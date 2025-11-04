@@ -314,6 +314,28 @@ func (acc *Account) GetBalance(c *ethclient.Client) (*big.Int, error) {
 	return balance, err
 }
 
+// GetBlockTime gets the current block time from the chain
+func GetBlockTime(c *ethclient.Client) (time.Time, error) {
+	ctx := context.Background()
+	header, err := c.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(int64(header.Time), 0), nil
+}
+
+// updateTimeNonceIfNeeded updates timenonce if it's too old (more than 12 hours from current time)
+func (acc *Account) updateTimeNonceIfNeeded() {
+	now := time.Now()
+	currentTimeMillis := uint64(now.UnixMilli())
+	timenonceTime := time.Unix(0, int64(acc.timenonce)*int64(time.Millisecond))
+
+	// If timenonce is more than 12 hours old, update it to current time
+	if acc.timenonce == 0 || now.Sub(timenonceTime) > 12*time.Hour {
+		acc.timenonce = currentTimeMillis
+	}
+}
+
 var r = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 func (acc *Account) TransferSignedTxReturnTx(withLock bool, c *ethclient.Client, to *Account, value *big.Int) (*types.Transaction, *big.Int, error) {
@@ -406,8 +428,25 @@ func (acc *Account) TransferTokenSignedTxWithGuaranteeRetry(c *ethclient.Client,
 		}
 		_, err = acc.SendTx(c, tx)
 		if err != nil {
-			log.Printf("Failed to send token transfer tx: err=%v, from=%v, to=%v, timenonce=%v, value=%v, token=%v",
-				err.Error(), acc.GetAddress().String(), to.GetAddress().String(), acc.timenonce, value.String(), token)
+			// Get blockTime for debugging
+			blockTime, blockTimeErr := GetBlockTime(c)
+			if blockTimeErr == nil {
+				txTime := time.Unix(0, int64(acc.timenonce)*int64(time.Millisecond))
+				drift := txTime.Sub(blockTime)
+				log.Printf("Failed to send token transfer tx: err=%v, from=%v, to=%v, timenonce=%v, value=%v, token=%v, blockTime=%v, txTime=%v, drift=%v",
+					err.Error(), acc.GetAddress().String(), to.GetAddress().String(), acc.timenonce, value.String(), token,
+					blockTime.Format(time.RFC3339Nano), txTime.Format(time.RFC3339Nano), drift)
+			} else {
+				log.Printf("Failed to send token transfer tx: err=%v, from=%v, to=%v, timenonce=%v, value=%v, token=%v, blockTimeError=%v",
+					err.Error(), acc.GetAddress().String(), to.GetAddress().String(), acc.timenonce, value.String(), token, blockTimeErr)
+			}
+			// Update timenonce if it's too far from block time
+			if strings.Contains(err.Error(), "time nonce too far from block time") {
+				acc.mutex.Lock()
+				acc.timenonce = uint64(time.Now().UnixMilli())
+				acc.mutex.Unlock()
+				log.Printf("Updated timenonce to current time: %v", acc.timenonce)
+			}
 			if strings.Contains(err.Error(), "insufficient") {
 				os.Exit(1)
 			}
@@ -472,6 +511,8 @@ func (acc *Account) GenLegacyTx(to *Account, value *big.Int, input []byte) (*typ
 func (acc *Account) GenSessionCreateTx() (*types.Transaction, error) {
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	sessionCtx, sessionKey, err := acc.NewSessionCreateCtx(uint64(1000000), acc.timenonce)
@@ -507,6 +548,8 @@ func (acc *Account) GenSessionCreateTx() (*types.Transaction, error) {
 func (acc *Account) GenSessionDeleteTx(i int) (*types.Transaction, error) {
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	sessionCtx, err := acc.NewSessionDeleteCtx(i, acc.timenonce)
@@ -539,6 +582,8 @@ func (acc *Account) GenSessionDeleteTx(i int) (*types.Transaction, error) {
 func (acc *Account) GenTransferTx(to *Account, value *big.Int) (*types.Transaction, error) {
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	ctx := acc.NewValueTransferCtx(to, value)
@@ -570,9 +615,8 @@ func (acc *Account) GenTokenTransferTx(to *Account, value *big.Int, token string
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
 
-	if acc.timenonce == 0 {
-		acc.timenonce = uint64(time.Now().UnixMilli())
-	}
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	ctx := acc.NewTokenTransferCtx(to, value, token)
@@ -603,6 +647,8 @@ func (acc *Account) GenTokenTransferTx(to *Account, value *big.Int, token string
 func (acc *Account) GenNewOrderTx(baseToken string, quoteToken string, side orderbook.Side, price *big.Int, quantity *big.Int, orderType orderbook.OrderType) (*types.Transaction, error) {
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	ctx := acc.NewOrderCtx(baseToken, quoteToken, side, price, quantity, orderType)
@@ -633,6 +679,8 @@ func (acc *Account) GenNewOrderTx(baseToken string, quoteToken string, side orde
 func (acc *Account) GenNewOrderTxWithTpsl(baseToken string, quoteToken string, side orderbook.Side, price *big.Int, quantity *big.Int, orderType orderbook.OrderType, tpLimit, slTrigger, slLimit *big.Int) (*types.Transaction, error) {
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	ctx := acc.NewOrderCtxWithTpsl(baseToken, quoteToken, side, price, quantity, orderType, tpLimit, slTrigger, slLimit)
@@ -663,6 +711,8 @@ func (acc *Account) GenNewOrderTxWithTpsl(baseToken string, quoteToken string, s
 func (acc *Account) GenNewStopOrderTx(baseToken string, quoteToken string, side orderbook.Side, stopPrice, price *big.Int, quantity *big.Int, orderType orderbook.OrderType) (*types.Transaction, error) {
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	ctx := acc.NewStopOrderCtx(baseToken, quoteToken, side, stopPrice, price, quantity, orderType)
@@ -693,6 +743,8 @@ func (acc *Account) GenNewStopOrderTx(baseToken string, quoteToken string, side 
 func (acc *Account) GenCancelAllTx() (*types.Transaction, error) {
 	acc.mutex.Lock()
 	defer acc.mutex.Unlock()
+	// Update timenonce if it's too old
+	acc.updateTimeNonceIfNeeded()
 	acc.timenonce++
 
 	ctx := acc.NewCancelAllCtx()
@@ -726,6 +778,28 @@ func (acc *Account) SendTx(c *ethclient.Client, tx *types.Transaction) (common.H
 
 	err := c.SendTransaction(ctx, tx)
 	if err != nil {
+		// Log blockTime and txNonce for time nonce related errors
+		if strings.Contains(err.Error(), "time nonce") {
+			blockTime, blockTimeErr := GetBlockTime(c)
+			if blockTimeErr == nil {
+				txNonce := tx.Nonce()
+				txTime := time.Unix(0, int64(txNonce)*int64(time.Millisecond))
+				drift := txTime.Sub(blockTime)
+				log.Printf("SendTx error (time nonce related): err=%v, sender=%v, txNonce=%v, blockTime=%v, txTime=%v, drift=%v",
+					err.Error(), acc.GetAddress().String(), txNonce,
+					blockTime.Format(time.RFC3339Nano), txTime.Format(time.RFC3339Nano), drift)
+			} else {
+				log.Printf("SendTx error (time nonce related): err=%v, sender=%v, txNonce=%v, blockTimeError=%v",
+					err.Error(), acc.GetAddress().String(), tx.Nonce(), blockTimeErr)
+			}
+			// Update timenonce if it's too far from block time
+			if strings.Contains(err.Error(), "time nonce too far from block time") {
+				acc.mutex.Lock()
+				acc.timenonce = uint64(time.Now().UnixMilli())
+				acc.mutex.Unlock()
+				log.Printf("Updated timenonce to current time: %v", acc.timenonce)
+			}
+		}
 		return common.Hash{}, err
 	}
 
