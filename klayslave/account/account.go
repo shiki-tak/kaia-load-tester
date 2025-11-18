@@ -996,6 +996,10 @@ func HierarchicalDistribute(accs []*Account, from *Account, value *big.Int, gasF
 
 	for i := 0; i < numChunks; i++ {
 		start := i * chunkSize
+		// Skip if start is beyond the slice bounds
+		if start >= len(accs) {
+			continue
+		}
 		end := min(start+chunkSize, len(accs))
 		chunkAccs := accs[start:end]
 
@@ -1018,7 +1022,7 @@ func HierarchicalDistribute(accs []*Account, from *Account, value *big.Int, gasF
 		wg.Add(1)
 		go func(child *Account, accounts []*Account) {
 			defer wg.Done()
-			HierarchicalDistribute(chunkAccs, richChild, value, gasFee, sendTx)
+			HierarchicalDistribute(accounts, child, value, gasFee, sendTx)
 		}(richChild, chunkAccs)
 	}
 
